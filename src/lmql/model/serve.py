@@ -27,6 +27,7 @@ import torch
 
 @dataclass
 class InferenceServerState:
+    client_address: str
     model_identifier: str
     tokenizer_descriptor: str
     dtype: str
@@ -312,9 +313,110 @@ class ModelProcessor:
 
 
 from typing import List, Optional
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, BaseSettings, Field
 from serving.types import *
+
+
+def do_queue_forward(server_state, payload: QueuePayloadForward, sample_id: int):
+    try:
+        if payload.model_identifier != server_state.model_identifier:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The inference API serves model {server_state.model_identifier} not {payload.model_identifier}.",
+            )
+
+        app._client_id = f"{self.client_address[0]}-{payload.client_id}"
+
+        server_state.queue.put(
+            {
+                "client_id": app.client_id,
+                "sample_id": sample_id,
+                "input_ids": payload.input_ids,
+                "attention_mask": payload.attention_mask,
+            }
+        )
+
+        return {"sample_id": sample_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Bad request.") from e
+
+
+def do_queue_tokenize(server_state, payload: QueuePayloadTokenize, sample_id: int):
+    try:
+        app._client_id = f"{self.client_address[0]}-{payload.client_id}"
+
+        server_state.tokenize_queue.put(
+            {
+                "client_id": app.client_id,
+                "sample_id": sample_id,
+                "action": "tokenize",
+                "text": payload.text,
+            }
+        )
+
+        return {"sample_id": sample_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Bad request.") from e
+
+
+def do_queue_detokenize(server_state, payload: QueuePayloadDetokenize, sample_id: int):
+    try:
+        app._client_id = f"{self.client_address[0]}-{payload.client_id}"
+
+        server_state.tokenize_queue.put(
+            {
+                "client_id": app.client_id,
+                "sample_id": sample_id,
+                "action": "detokenize",
+                "input_ids": payload.input_ids,
+            }
+        )
+
+        return {"sample_id": sample_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Bad request.") from e
+
+
+def process_some_all_results(server_state, max=10):
+    all_results_queue = server_state.all_results_queue
+    i = 0
+
+    print("\n" * 10)
+    print("QUEUE IS " + ("" if all_results_queue.empty() else "NOT") + " EMPTY")
+    print("\n" * 10)
+
+    while not all_results_queue.empty() and i < max:
+        result = all_results_queue.get()
+
+        result_client_id = result["client_id"]
+
+        if result_client_id not in server_state.client_results_queues:
+            server_state.client_results_queues[result_client_id] = Queue()
+        server_state.client_results_queues[result_client_id].put(result)
+        i += 1
+
+
+def do_get_results_content(server_state, request_client_id):
+    server_state.client_id = f"{server_state.client_address[0]}-{request_client_id}"
+
+    process_some_all_results(server_state)
+
+    if server_state.client_id not in server_state.client_results_queues.keys():
+        yield
+    # return all results for server_state.client_id currently available
+    while not server_state.client_results_queues[server_state.client_id].empty():
+        result = server_state.client_results_queues[server_state.client_id].get()
+        yield ResultsResponse(**result)
+
+        # omit last colon
+        if server_state.client_results_queues[server_state.client_id].empty():
+            break
+
+
+from fastapi.requests import Request
+from fastapi import Body
+from typing import Union
 
 
 def get_app(app_config: AppConfig):
@@ -322,46 +424,63 @@ def get_app(app_config: AppConfig):
     app = FastAPI()
 
     @app.post("/queue")
-    async def queue(payload: QueuePayload):
-        if payload.forward is not None:
+    async def queue(
+        payload: Union[
+            QueuePayloadTokenize, QueuePayloadForward, QueuePayloadDetokenize
+        ] = Body(...)
+    ):
+        if type(payload) is QueuePayloadForward:
             # process forward action
-            input_ids = payload.forward.input_ids
-            attention_mask = payload.forward.attention_mask
-            model_identifier = payload.forward.model_identifier
-            client_id = payload.forward.client_id
-            sample_id = payload.forward.sample_id
+            input_ids = payload.input_ids
+            attention_mask = payload.attention_mask
+            model_identifier = payload.model_identifier
+            client_id = payload.client_id
+            sample_id = payload.sample_id
 
-            # TODO: implement model processing and queueing of input_ids and attention_mask
+            # TODO: implement processing model and queueing of input_ids and attention_mask
 
-            return QueueResults(sample_id=sample_id)
-        elif payload.tokenize is not None:
+            do_queue_forward(app.state.server_state, payload, sample_id)
+            res = QueueResults(sample_id=sample_id)
+        elif type(payload) is QueuePayloadTokenize:
             # process tokenize action
-            text = payload.tokenize.text
-            client_id = payload.tokenize.client_id
-            sample_id = payload.tokenize.sample_id
+            text = payload.text
+            client_id = payload.client_id
+            sample_id = payload.sample_id
 
             # TODO: implement tokenization and queueing of text
-
-            return QueueResults(sample_id=sample_id)
-        elif payload.detokenize is not None:
+            do_queue_tokenize(app.state.server_state, payload, sample_id)
+            res = QueueResults(sample_id=sample_id)
+        elif type(payload) is QueuePayloadDetokenize:
             # process detokenize action
-            input_ids = payload.detokenize.input_ids
-            client_id = payload.detokenize.client_id
-            sample_id = payload.detokenize.sample_id
+            input_ids = payload.input_ids
+            client_id = payload.client_id
+            sample_id = payload.sample_id
 
             # TODO: implement detokenization and queueing of input_ids
 
-            return QueueResults(sample_id=sample_id)
+            do_queue_detokenize(app.state.server_state, payload, sample_id)
+            res = QueueResults(sample_id=sample_id)
+
+        print("\n" * 10)
+        print(
+            "QUEUE IS "
+            + ("" if app.state.server_state.all_results_queue.empty() else "NOT")
+            + " EMPTY"
+        )
+        print("\n" * 10)
+
+        return res
 
     @app.get("/results/{client_id}", response_model=List[ResultsResponse])
     async def results(client_id: str):
         # TODO: implement retrieval of results for specified client_id
-        return []
+        return list(do_get_results_content(app.state.server_state, client_id))
 
     @app.on_event("startup")
     def start():
         manager = multiprocessing.Manager()
-        app.state = InferenceServerState(
+        app.state.server_state = InferenceServerState(
+            "localhost",
             app_config.model_descriptor,
             app_config.tokenizer_descriptor,
             app_config.dtype,
@@ -374,21 +493,23 @@ def get_app(app_config: AppConfig):
         if app_config.tokenizer_descriptor is None:
             tokenizer_descriptor = app_config.model_descriptor
         # run model in separate process
-        app.state.processor = ModelProcessor(
-            app.state, cuda=app_config.cuda, cache=app_config.cache
+        app.state.server_state.processor = ModelProcessor(
+            app.state.server_state, cuda=app_config.cuda, cache=app_config.cache
         )
-        app.state.processor.run_in_parallel()
+        app.state.server_state.processor.run_in_parallel()
 
         # run tokenizers in separate process
-        app.state.tokenizer_processor = TokenizerProcessor(app.state)
-        app.state.tokenizer_processor.run_in_parallel(
+        app.state.server_state.tokenizer_processor = TokenizerProcessor(
+            app.state.server_state
+        )
+        app.state.server_state.tokenizer_processor.run_in_parallel(
             n=app_config.num_tokenizer_processes
         )
 
     @app.on_event("shutdown")
     def shutdown():
-        app.state.processor.shutdown()
-        app.state.tokenizer_processor.shutdown()
+        app.state.server_state.processor.shutdown()
+        app.state.server_state.tokenizer_processor.shutdown()
 
     return app
 
