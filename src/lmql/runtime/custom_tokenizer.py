@@ -13,7 +13,8 @@ class CustomPreTrainedTokenizer(PreTrainedTokenizer):
 
     @classmethod
     def from_pretrained(cls, path):
-        tok = Tokenizer.from_file(str(path / "20B_tokenizer.json"))
+        p = P(path)
+        tok = Tokenizer.from_file(str(p / "20B_tokenizer.json"))
         return CustomPreTrainedTokenizer(tokenizer=tok)
 
     @property
@@ -26,11 +27,11 @@ class CustomPreTrainedTokenizer(PreTrainedTokenizer):
 
     @property
     def bos_token_id(self):
-        return 50276
+        return 209
 
     @property
     def eos_token_id(self):
-        return 0
+        return 50276
 
     def _tokenize(self, text):
         return self.tokenizer.encode(text).tokens
