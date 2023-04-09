@@ -46,7 +46,7 @@ logging.basicConfig(level="INFO")
 class RWKVWrapper(BaseModel):
     rwkv_model: rwkv.model.RWKV
     state: Optional[torch.Tensor] = Field(default=None)
-    update_state: bool = Field(default=False)
+    update_state: bool = Field(default=True)
 
     def __call__(self, input_ids, attention_mask):
         logits, state = self.rwkv_model.forward(
