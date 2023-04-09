@@ -1,3 +1,4 @@
+import logging
 import uuid
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -28,7 +29,34 @@ class ResultResponse(BaseModel):
     next_token_logits: List[List[float]]
 
 
-strategy = "cuda fp16"
+strategy = "cpu fp32"  # cuda fp16"
+
+
+class RWKVResult(BaseModel):
+    logits: torch.Tensor
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
+logging.basicConfig(level="INFO")
+
+
+class RWKVWrapper(BaseModel):
+    rwkv_model: rwkv.model.RWKV
+    state: Optional[torch.Tensor] = Field(default=None)
+    update_state: bool = Field(default=False)
+
+    def __call__(self, input_ids, attention_mask):
+        logits, state = self.rwkv_model.forward(
+            input_ids, state=self.state, full_output=True
+        )
+        if self.update_state:
+            self.state = state
+        return RWKVResult(logits=logits.reshape(-1, *logits.shape))
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class ModelCache(BaseModel):
@@ -41,11 +69,9 @@ class ModelCache(BaseModel):
             model_path = Path(model_identifier)
             model = rwkv.model.RWKV(model=str(model_path), strategy=strategy)
 
-            maybe_tokenizer_paths = list(model_path.parent.glob("*.json"))
-            assert len(maybe_tokenizer_paths) == 1
-            tokenizer_path = maybe_tokenizer_paths[0]
+            tokenizer_path = str(model_path.parent / "20B_tokenizer.json")
             tokenizer = Tokenizer.from_file(tokenizer_path)
-            return model, tokenizer
+            return RWKVWrapper(rwkv_model=model), tokenizer
         else:
             model = AutoModelForCausalLM.from_pretrained(model_identifier)
             tokenizer = AutoTokenizer.from_pretrained(model_identifier)
@@ -86,6 +112,7 @@ def get_app():
             output = model(
                 input_ids=input_ids_tensor, attention_mask=attention_mask_tensor
             )
+        logging.info(f"logits {output.logits.shape}")
 
         next_token_logits = output.logits[:, -1].tolist()
         app.state.model_cache.results[request.client_id] = {

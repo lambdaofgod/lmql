@@ -1,3 +1,8 @@
+from transformers import PreTrainedTokenizer, AutoTokenizer
+from pathlib import Path
+import ipdb
+
+
 def get_js_tokenizer(model_identifier):
     import js
     from pyodide.ffi import to_js
@@ -5,7 +10,8 @@ def get_js_tokenizer(model_identifier):
     assert "gpt" in model_identifier, "JS tokenizer only supports GPT models."
 
     class JSBridgedTokenizer:
-        """ Custom tokenizer to be used only in a browser environment. This tokenizer only supports GPT tokenization. """
+        """Custom tokenizer to be used only in a browser environment. This tokenizer only supports GPT tokenization."""
+
         def __init__(self):
             self.bos_token_id = 50256
             self.eos_token_id = 50256
@@ -30,12 +36,12 @@ def get_js_tokenizer(model_identifier):
                 s = [s]
                 unpack = True
             tokens = [js.tokenize_gpt_toks(se).to_py() for se in s]
-            
+
             if unpack:
                 return tokens[0]
             else:
                 return tokens
-         
+
         def decode(self, input_ids):
             # set typed array type of input_ids to int
             return str(js.detokenize_gpt(to_js([int(i) for i in input_ids])))
@@ -46,22 +52,33 @@ def get_js_tokenizer(model_identifier):
                 s = [s]
                 unpack = True
             input_ids = [[int(v) for v in js.tokenize_gpt(se)] for se in s]
-            
+
             if unpack:
                 return {"input_ids": input_ids[0]}
             else:
                 return {"input_ids": input_ids}
-    
+
     return JSBridgedTokenizer()
+
 
 global special_token_mappings
 special_token_mappings = {}
 global reverse_special_token_mappings
 reverse_special_token_mappings = {}
 
+
 class LMQLTokenizer:
     def __init__(self, tokenizer_impl):
         self.tokenizer_impl = tokenizer_impl
+
+    @staticmethod
+    def setup_pretrained(path):
+        try:
+            return AutoTokenizer.from_pretrained(path)
+        except:
+            from .custom_tokenizer import CustomPreTrainedTokenizer
+
+            return CustomPreTrainedTokenizer.from_pretrained(Path(path).parent)
 
     @property
     def vocab_size(self):
@@ -70,7 +87,7 @@ class LMQLTokenizer:
     @property
     def bos_token_id(self):
         return self.tokenizer_impl.bos_token_id
-    
+
     @property
     def eos_token_id(self):
         return self.tokenizer_impl.eos_token_id
@@ -90,7 +107,7 @@ class LMQLTokenizer:
             else:
                 tokens += self.tokenizer_impl.tokenize(s)
         return tokens
-        
+
     def decode(self, input_ids):
         s = ""
         for chunk in self.chunk_out_by_special_ids(input_ids):
@@ -115,16 +132,16 @@ class LMQLTokenizer:
                 else:
                     chunk_input_ids += self.tokenizer_impl(chunk)["input_ids"]
             input_ids.append(chunk_input_ids)
-        
+
         if unpack:
             return {"input_ids": input_ids[0]}
         else:
             return {"input_ids": input_ids}
-    
+
     def special_token_id(self, identifier):
         global special_token_mappings
         global reverse_special_token_mappings
-        
+
         if identifier not in special_token_mappings:
             if len(special_token_mappings) == 0:
                 # offset vocabulary IDs by at least the next decimal power of 10
@@ -136,7 +153,7 @@ class LMQLTokenizer:
                 special_token_mappings[identifier] = next_id
                 reverse_special_token_mappings[next_id] = identifier
         return special_token_mappings[identifier]
-    
+
     def chunk_out_by_special_ids(self, input_ids, tokenize=True):
         global reverse_special_token_mappings
         c = []
@@ -149,14 +166,15 @@ class LMQLTokenizer:
             else:
                 c.append(i)
         yield c
-    
+
     def chunk_out_by_tags(self, s, tokenize=True):
         # filter out all special tokens <lmql:.../>
         import re
+
         segments = []
         offset = 0
         for m in re.finditer(r"<lmql:(.*?)\/>", s):
-            segments.append(s[offset:m.start()])
+            segments.append(s[offset : m.start()])
             if tokenize:
                 segments.append(self.special_token_id("lmql:" + m.group(1)))
             else:
@@ -164,6 +182,7 @@ class LMQLTokenizer:
             offset = m.end()
         segments.append(s[offset:])
         return segments
+
 
 def load_tokenizer(model_identifier):
     import os
@@ -188,11 +207,12 @@ def load_tokenizer(model_identifier):
         with open(cache_path, "rb") as f:
             return LMQLTokenizer(pickle.load(f))
     else:
-        from transformers import AutoTokenizer
-        t = AutoTokenizer.from_pretrained(model_identifier)
+
+        t = LMQLTokenizer.setup_pretrained(model_identifier)
         with open(cache_path, "wb") as f:
             pickle.dump(t, f)
         return LMQLTokenizer(t)
+
 
 if __name__ == "__main__":
     import sys
@@ -204,6 +224,7 @@ if __name__ == "__main__":
 
     if to_tokenize.startswith("["):
         import json
+
         to_tokenize = json.loads(to_tokenize)
         print(str([t.decode(torch.tensor(to_tokenize))])[1:-1])
     else:
@@ -212,11 +233,11 @@ if __name__ == "__main__":
         print(t.convert_ids_to_tokens(res["input_ids"]))
         n = 0
         result = ""
-        for t,id in sorted(t.vocab.items(), key=lambda p: p[1]):
+        for t, id in sorted(t.vocab.items(), key=lambda p: p[1]):
             # contains digit
             digits = "0123456789"
             if len(t) < 4 and any(c in digits for c in t):
-                print(t,id)
+                print(t, id)
                 n += 1
                 result += f""""{t}","""
         print(n)
