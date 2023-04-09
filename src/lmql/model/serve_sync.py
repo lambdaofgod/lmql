@@ -8,6 +8,7 @@ import torch
 from tokenizers import Tokenizer
 from pathlib import Path
 import rwkv.model
+from lmql.runtime import custom_tokenizer
 
 
 class QueueRequest(BaseModel):
@@ -68,9 +69,9 @@ class ModelCache(BaseModel):
         if "rwkv" in model_identifier:
             model_path = Path(model_identifier)
             model = rwkv.model.RWKV(model=str(model_path), strategy=strategy)
-
-            tokenizer_path = str(model_path.parent / "20B_tokenizer.json")
-            tokenizer = Tokenizer.from_file(tokenizer_path)
+            tokenizer = custom_tokenizer.CustomPreTrainedTokenizer.from_pretrained(
+                model_path.parent
+            )
             return RWKVWrapper(rwkv_model=model), tokenizer
         else:
             model = AutoModelForCausalLM.from_pretrained(model_identifier)
